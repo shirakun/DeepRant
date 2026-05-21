@@ -189,6 +189,26 @@ fn get_model_config(settings: &crate::store::AppSettings) -> crate::store::Model
     }
 }
 
+/// 根据 API 类型自动补全完整请求 URL。
+/// 用户只需填写 base URL（如 https://hk.routeai.cc），路径自动追加。
+/// 如果用户已经填写了完整 URL，则不重复补全。
+fn resolve_api_url(base_url: &str, api_type: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+
+    // 已包含路径关键字时直接使用，向后兼容
+    if trimmed.contains("/chat/completions") || trimmed.ends_with("/messages") {
+        return trimmed.to_string();
+    }
+
+    let suffix = match api_type.to_lowercase().as_str() {
+        "anthropic" => "/v1/messages",
+        // openai 与 opencode-go 都使用 OpenAI 兼容路径
+        _ => "/v1/chat/completions",
+    };
+
+    format!("{}{}", trimmed, suffix)
+}
+
 pub async fn translate_with_gpt(app: &AppHandle, original: &str) -> Result<String> {
     let settings = crate::store::get_settings(app)?;
     println!("当前翻译设置:");
@@ -201,9 +221,12 @@ pub async fn translate_with_gpt(app: &AppHandle, original: &str) -> Result<Strin
 
     let model_config = get_model_config(&settings);
 
-    println!("正在发送请求到: {}", model_config.api_url);
+    let api_type = model_config.api_type.to_lowercase();
+    let resolved_url = resolve_api_url(&model_config.api_url, &api_type);
+
+    println!("正在发送请求到: {}", resolved_url);
     println!("使用的模型: {}", model_config.model_name);
-    println!("API密钥前缀: {}", &model_config.auth[..6]);
+    println!("API密钥前缀: {}", &model_config.auth[..6.min(model_config.auth.len())]);
 
     let system_prompt = get_system_prompt(
         &settings.translation_from,
@@ -214,8 +237,6 @@ pub async fn translate_with_gpt(app: &AppHandle, original: &str) -> Result<Strin
     );
 
     let client = Client::new();
-
-    let api_type = model_config.api_type.to_lowercase();
 
     let request_body = if api_type == "anthropic" {
         // Anthropic API 格式
@@ -270,7 +291,7 @@ pub async fn translate_with_gpt(app: &AppHandle, original: &str) -> Result<Strin
     };
 
     let request_builder = client
-        .post(&model_config.api_url)
+        .post(&resolved_url)
         .header("Content-Type", "application/json");
 
     let request_builder = if api_type == "anthropic" {

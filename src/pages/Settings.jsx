@@ -4,10 +4,21 @@ import { useState, useEffect } from 'react';
 import { useStore } from '../components/StoreProvider';
 import { showSuccess, showError } from '../utils/toast';
 
+// 根据 API 类型自动补全完整请求 URL
+const resolveApiUrl = (baseUrl, apiType) => {
+    const trimmed = (baseUrl || '').trim().replace(/\/+$/, '');
+    if (trimmed.includes('/chat/completions') || trimmed.endsWith('/messages')) {
+        return trimmed;
+    }
+    const suffix = apiType === 'anthropic' ? '/v1/messages' : '/v1/chat/completions';
+    return `${trimmed}${suffix}`;
+};
+
 // 添加测试函数
 const testOpenAIConnection = async (apiKey, baseUrl, modelName, apiType = 'openai') => {
     try {
         let headers, body;
+        const fullUrl = resolveApiUrl(baseUrl, apiType);
 
         if (apiType === 'anthropic') {
             headers = {
@@ -43,7 +54,7 @@ const testOpenAIConnection = async (apiKey, baseUrl, modelName, apiType = 'opena
             });
         }
 
-        const response = await fetch(`${baseUrl}`, {
+        const response = await fetch(fullUrl, {
             method: 'POST',
             headers: headers,
             body: body
@@ -223,7 +234,7 @@ export default function Settings() {
                                     }
                                 })}
                                 className="w-full px-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm text-zinc-700 dark:text-zinc-300 disabled:cursor-not-allowed disabled:opacity-50"
-                                placeholder="例如：https://api.openai.com/v1/chat/completions"
+                                placeholder="例如：https://hk.routeai.cc （路径将根据API类型自动补全）"
                             />
                         </div>
                         <div>
