@@ -14,72 +14,113 @@ const resolveApiUrl = (baseUrl, apiType) => {
     return `${trimmed}${suffix}`;
 };
 
-// 添加测试函数
+// 添加测试函数。失败时抛出的 Error 会带 `.details` 字段，包含完整诊断信息。
 const testOpenAIConnection = async (apiKey, baseUrl, modelName, apiType = 'openai') => {
-    try {
-        let headers, body;
-        const fullUrl = resolveApiUrl(baseUrl, apiType);
+    const fullUrl = resolveApiUrl(baseUrl, apiType);
+    const startedAt = Date.now();
 
-        if (apiType === 'anthropic') {
-            headers = {
-                'Content-Type': 'application/json',
-                'x-api-key': apiKey,
-                'anthropic-version': '2023-06-01'
-            };
-            body = JSON.stringify({
-                model: modelName,
-                messages: [
-                    {
-                        role: "user",
-                        content: "Hello, this is a test message. Please reply with 'OK' if you receive this."
-                    }
-                ],
-                max_tokens: 10
-            });
-        } else {
-            // openai 和 opencode-go 都使用 OpenAI 兼容格式
-            headers = {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-            };
-            body = JSON.stringify({
-                model: modelName,
-                messages: [
-                    {
-                        role: "user",
-                        content: "Hello, this is a test message. Please reply with 'OK' if you receive this."
-                    }
-                ],
-                max_tokens: 10
-            });
-        }
-
-        const response = await fetch(fullUrl, {
-            method: 'POST',
-            headers: headers,
-            body: body
-        });
-
-        const data = await response.json();
-
-        if (data.error) {
-            throw new Error(data.error.message || '未知错误');
-        }
-
-        if (apiType === 'anthropic') {
-            if (data.content && data.content[0] && data.content[0].text) {
-                return true;
-            }
-        } else {
-            if (data.choices && data.choices[0] && data.choices[0].message) {
-                return true;
-            }
-        }
-
-        throw new Error('响应格式不正确');
-    } catch (error) {
-        throw new Error(`API测试失败: ${error.message}`);
+    let headers, body;
+    if (apiType === 'anthropic') {
+        headers = {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01'
+        };
+    } else {
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        };
     }
+    body = JSON.stringify({
+        model: modelName,
+        messages: [
+            {
+                role: "user",
+                content: "Hello, this is a test message. Please reply with 'OK' if you receive this."
+            }
+        ],
+        max_tokens: 10
+    });
+
+    // 屏蔽密钥用于诊断展示
+    const maskedHeaders = { ...headers };
+    if (maskedHeaders.Authorization) {
+        maskedHeaders.Authorization = `Bearer ${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`;
+    }
+    if (maskedHeaders['x-api-key']) {
+        maskedHeaders['x-api-key'] = `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`;
+    }
+
+    const baseDetails = {
+        request: {
+            url: fullUrl,
+            method: 'POST',
+            apiType,
+            headers: maskedHeaders,
+            bodyPreview: body
+        }
+    };
+
+    let response;
+    try {
+        response = await fetch(fullUrl, { method: 'POST', headers, body });
+    } catch (e) {
+        // 网络层错误（CORS、DNS、SSL、未连接……）通常没有 response
+        const err = new Error(`API测试失败：网络层错误 - ${e.message || e.name}`);
+        err.details = {
+            ...baseDetails,
+            elapsedMs: Date.now() - startedAt,
+            errorType: e.name || 'Error',
+            errorMessage: e.message || String(e),
+            errorStack: e.stack || null,
+            hint: '常见原因：1) Tauri webview 的 CORS 限制；2) URL 错误或域名解析失败；3) HTTPS 证书问题；4) 防火墙/代理拦截。建议改用后端发请求。'
+        };
+        throw err;
+    }
+
+    // 拿到响应 -> 先以文本形式读取，再尝试 JSON 解析（防止响应不是 JSON 时丢失信息）
+    const rawText = await response.text();
+    let data = null;
+    let parseError = null;
+    try {
+        data = JSON.parse(rawText);
+    } catch (e) {
+        parseError = e.message;
+    }
+
+    const responseInfo = {
+        status: response.status,
+        statusText: response.statusText,
+        ok: response.ok,
+        bodyPreview: rawText.length > 2000 ? rawText.slice(0, 2000) + '...(truncated)' : rawText,
+        parseError
+    };
+
+    if (!response.ok) {
+        const apiMsg = data?.error?.message || data?.message || rawText.slice(0, 200);
+        const err = new Error(`API测试失败：HTTP ${response.status} - ${apiMsg}`);
+        err.details = { ...baseDetails, elapsedMs: Date.now() - startedAt, response: responseInfo };
+        throw err;
+    }
+
+    if (data?.error) {
+        const err = new Error(`API测试失败：${data.error.message || '未知错误'}`);
+        err.details = { ...baseDetails, elapsedMs: Date.now() - startedAt, response: responseInfo };
+        throw err;
+    }
+
+    const success = apiType === 'anthropic'
+        ? !!(data?.content?.[0]?.text)
+        : !!(data?.choices?.[0]?.message);
+
+    if (!success) {
+        const err = new Error('API测试失败：响应格式不正确');
+        err.details = { ...baseDetails, elapsedMs: Date.now() - startedAt, response: responseInfo };
+        throw err;
+    }
+
+    return { ok: true, details: { ...baseDetails, elapsedMs: Date.now() - startedAt, response: responseInfo } };
 };
 
 const MODEL_OPTIONS = [
@@ -109,6 +150,8 @@ export default function Settings() {
     const { settings, updateSettings } = useStore();
     const [activeModel, setActiveModel] = useState(settings?.model_type || 'deepseek');
     const [isTestingConnection, setIsTestingConnection] = useState(false);
+    // testResult: { ok: boolean, message: string, details: object } | null
+    const [testResult, setTestResult] = useState(null);
 
     useEffect(() => {
         if (settings?.model_type) {
@@ -274,6 +317,7 @@ export default function Settings() {
                                         }
 
                                         setIsTestingConnection(true);
+                                        setTestResult(null);
                                         try {
                                             const result = await testOpenAIConnection(
                                                 settings.custom_model.auth,
@@ -281,11 +325,13 @@ export default function Settings() {
                                                 settings.custom_model.model_name,
                                                 settings.custom_model.api_type
                                             );
-                                            if (result) {
+                                            if (result?.ok) {
                                                 showSuccess('API连接测试成功！');
+                                                setTestResult({ ok: true, message: 'API连接测试成功', details: result.details });
                                             }
                                         } catch (error) {
                                             showError(error.message);
+                                            setTestResult({ ok: false, message: error.message, details: error.details || { errorMessage: error.message, errorStack: error.stack } });
                                         } finally {
                                             setIsTestingConnection(false);
                                         }
@@ -322,6 +368,49 @@ export default function Settings() {
                                 </button>
                             )}
                         </div>
+                        {/* 测试详情面板 */}
+                        {activeModel === 'custom' && testResult && (
+                            <div className={`mt-3 rounded-lg border text-xs ${testResult.ok
+                                ? 'border-green-200 bg-green-50 dark:bg-green-900/10 dark:border-green-900/40'
+                                : 'border-red-200 bg-red-50 dark:bg-red-900/10 dark:border-red-900/40'
+                                }`}>
+                                <div className="flex items-center justify-between px-3 py-2 border-b border-inherit">
+                                    <span className={`font-medium ${testResult.ok ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                                        {testResult.ok ? '✓ ' : '✗ '}{testResult.message}
+                                    </span>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={async () => {
+                                                const text = JSON.stringify(testResult.details, null, 2);
+                                                try {
+                                                    await navigator.clipboard.writeText(text);
+                                                    showSuccess('已复制详情');
+                                                } catch {
+                                                    showError('复制失败，请手动选择文本');
+                                                }
+                                            }}
+                                            className="px-2 py-0.5 rounded border border-zinc-300 dark:border-zinc-600 hover:bg-white/50 dark:hover:bg-zinc-800/50 text-zinc-600 dark:text-zinc-300"
+                                        >
+                                            复制详情
+                                        </button>
+                                        <button
+                                            onClick={() => setTestResult(null)}
+                                            className="px-2 py-0.5 rounded border border-zinc-300 dark:border-zinc-600 hover:bg-white/50 dark:hover:bg-zinc-800/50 text-zinc-600 dark:text-zinc-300"
+                                        >
+                                            关闭
+                                        </button>
+                                    </div>
+                                </div>
+                                <pre className="px-3 py-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-zinc-700 dark:text-zinc-300 font-mono leading-relaxed">
+{JSON.stringify(testResult.details, null, 2)}
+                                </pre>
+                                {!testResult.ok && testResult.details?.hint && (
+                                    <div className="px-3 py-2 border-t border-inherit text-zinc-500 dark:text-zinc-400">
+                                        💡 {testResult.details.hint}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 </motion.div>
             </div>
