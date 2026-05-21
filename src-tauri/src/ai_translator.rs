@@ -209,6 +209,232 @@ fn resolve_api_url(base_url: &str, api_type: &str) -> String {
     format!("{}{}", trimmed, suffix)
 }
 
+/// 屏蔽 API key 中间字符，仅展示前后 4 位
+fn mask_secret(s: &str) -> String {
+    let len = s.chars().count();
+    if len <= 8 {
+        return "*".repeat(len);
+    }
+    let prefix: String = s.chars().take(4).collect();
+    let suffix: String = s.chars().skip(len.saturating_sub(4)).collect();
+    format!("{}...{}", prefix, suffix)
+}
+
+/// 测试自定义 API 连接性。返回完整诊断信息（成功或失败均带 details）。
+/// 走 Rust 后端 reqwest，不受前端 CORS 限制。
+pub async fn test_api_connection(
+    api_key: String,
+    base_url: String,
+    model_name: String,
+    api_type: String,
+) -> Value {
+    let started = std::time::Instant::now();
+    let api_type_lc = api_type.to_lowercase();
+    let resolved_url = resolve_api_url(&base_url, &api_type_lc);
+
+    let body = if api_type_lc == "anthropic" {
+        json!({
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello, this is a test message. Please reply with 'OK' if you receive this."
+                }
+            ],
+            "max_tokens": 10
+        })
+    } else {
+        json!({
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello, this is a test message. Please reply with 'OK' if you receive this."
+                }
+            ],
+            "max_tokens": 10
+        })
+    };
+
+    let masked_headers = if api_type_lc == "anthropic" {
+        json!({
+            "Content-Type": "application/json",
+            "x-api-key": mask_secret(&api_key),
+            "anthropic-version": "2023-06-01"
+        })
+    } else {
+        json!({
+            "Content-Type": "application/json",
+            "Authorization": format!("Bearer {}", mask_secret(&api_key))
+        })
+    };
+
+    let request_info = json!({
+        "url": resolved_url,
+        "method": "POST",
+        "apiType": api_type_lc,
+        "headers": masked_headers,
+        "bodyPreview": body.to_string()
+    });
+
+    let client = match Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return json!({
+                "ok": false,
+                "message": format!("API测试失败：HTTP 客户端初始化错误 - {}", e),
+                "details": {
+                    "request": request_info,
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                    "errorType": "ClientBuildError",
+                    "errorMessage": e.to_string()
+                }
+            });
+        }
+    };
+
+    let req = client
+        .post(&resolved_url)
+        .header("Content-Type", "application/json");
+
+    let req = if api_type_lc == "anthropic" {
+        req.header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01")
+    } else {
+        req.header("Authorization", format!("Bearer {}", api_key))
+    };
+
+    let resp = match req.json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({
+                "ok": false,
+                "message": format!("API测试失败：网络层错误 - {}", e),
+                "details": {
+                    "request": request_info,
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                    "errorType": "NetworkError",
+                    "errorMessage": e.to_string(),
+                    "hint": "可能的原因：1) URL 错误或域名解析失败；2) HTTPS 证书问题；3) 防火墙/代理拦截；4) 服务端无响应/超时。"
+                }
+            });
+        }
+    };
+
+    let status = resp.status();
+    let status_code = status.as_u16();
+    let status_text = status.canonical_reason().unwrap_or("").to_string();
+
+    let raw_text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            return json!({
+                "ok": false,
+                "message": format!("API测试失败：读取响应体错误 - {}", e),
+                "details": {
+                    "request": request_info,
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                    "errorType": "ReadBodyError",
+                    "errorMessage": e.to_string()
+                }
+            });
+        }
+    };
+
+    let parsed: Option<Value> = serde_json::from_str(&raw_text).ok();
+    let body_preview: String = if raw_text.chars().count() > 2000 {
+        let truncated: String = raw_text.chars().take(2000).collect();
+        format!("{}...(truncated)", truncated)
+    } else {
+        raw_text.clone()
+    };
+
+    let response_info = json!({
+        "status": status_code,
+        "statusText": status_text,
+        "ok": status.is_success(),
+        "bodyPreview": body_preview,
+        "parseError": if parsed.is_none() && !raw_text.is_empty() { Some("响应非有效 JSON") } else { None }
+    });
+
+    if !status.is_success() {
+        let api_msg = parsed
+            .as_ref()
+            .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()))
+            .or_else(|| parsed.as_ref().and_then(|v| v.get("message")).and_then(|m| m.as_str()))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| raw_text.chars().take(200).collect());
+
+        return json!({
+            "ok": false,
+            "message": format!("API测试失败：HTTP {} - {}", status_code, api_msg),
+            "details": {
+                "request": request_info,
+                "elapsedMs": started.elapsed().as_millis() as u64,
+                "response": response_info
+            }
+        });
+    }
+
+    if let Some(ref v) = parsed {
+        if let Some(err) = v.get("error") {
+            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("未知错误");
+            return json!({
+                "ok": false,
+                "message": format!("API测试失败：{}", msg),
+                "details": {
+                    "request": request_info,
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                    "response": response_info
+                }
+            });
+        }
+    }
+
+    let success = if api_type_lc == "anthropic" {
+        parsed
+            .as_ref()
+            .and_then(|v| v.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("text"))
+            .is_some()
+    } else {
+        parsed
+            .as_ref()
+            .and_then(|v| v.get("choices"))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|c| c.get("message"))
+            .is_some()
+    };
+
+    if !success {
+        return json!({
+            "ok": false,
+            "message": "API测试失败：响应格式不正确",
+            "details": {
+                "request": request_info,
+                "elapsedMs": started.elapsed().as_millis() as u64,
+                "response": response_info
+            }
+        });
+    }
+
+    json!({
+        "ok": true,
+        "message": "API连接测试成功",
+        "details": {
+            "request": request_info,
+            "elapsedMs": started.elapsed().as_millis() as u64,
+            "response": response_info
+        }
+    })
+}
+
 pub async fn translate_with_gpt(app: &AppHandle, original: &str) -> Result<String> {
     let settings = crate::store::get_settings(app)?;
     println!("当前翻译设置:");

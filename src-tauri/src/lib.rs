@@ -34,6 +34,16 @@ async fn get_settings(app_handle: tauri::AppHandle) -> Result<store::AppSettings
     store::get_settings(&app_handle).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn test_api_connection(
+    api_key: String,
+    base_url: String,
+    model_name: String,
+    api_type: String,
+) -> serde_json::Value {
+    ai_translator::test_api_connection(api_key, base_url, model_name, api_type).await
+}
+
 pub fn run() {
     println!("Starting application...");
 
@@ -74,7 +84,8 @@ pub fn run() {
             update_translator_shortcut,
             log_to_backend,
             get_settings,
-            get_version
+            get_version,
+            test_api_connection
         ]);
 
     // 只在非Windows系统上添加窗口事件监听

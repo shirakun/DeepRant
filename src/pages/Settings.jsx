@@ -3,124 +3,23 @@ import { Server, Crown, Sparkles, Cube } from '../icons';
 import { useState, useEffect } from 'react';
 import { useStore } from '../components/StoreProvider';
 import { showSuccess, showError } from '../utils/toast';
+import { invoke } from '@tauri-apps/api/core';
 
-// 根据 API 类型自动补全完整请求 URL
-const resolveApiUrl = (baseUrl, apiType) => {
-    const trimmed = (baseUrl || '').trim().replace(/\/+$/, '');
-    if (trimmed.includes('/chat/completions') || trimmed.endsWith('/messages')) {
-        return trimmed;
-    }
-    const suffix = apiType === 'anthropic' ? '/v1/messages' : '/v1/chat/completions';
-    return `${trimmed}${suffix}`;
-};
-
-// 添加测试函数。失败时抛出的 Error 会带 `.details` 字段，包含完整诊断信息。
+// 通过 Rust 后端测试连接（绕过前端 webview 的 CORS 限制）。
+// 后端返回 { ok, message, details } 结构，前端原样展示。
 const testOpenAIConnection = async (apiKey, baseUrl, modelName, apiType = 'openai') => {
-    const fullUrl = resolveApiUrl(baseUrl, apiType);
-    const startedAt = Date.now();
-
-    let headers, body;
-    if (apiType === 'anthropic') {
-        headers = {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01'
-        };
-    } else {
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`
-        };
-    }
-    body = JSON.stringify({
-        model: modelName,
-        messages: [
-            {
-                role: "user",
-                content: "Hello, this is a test message. Please reply with 'OK' if you receive this."
-            }
-        ],
-        max_tokens: 10
+    const result = await invoke('test_api_connection', {
+        apiKey,
+        baseUrl,
+        modelName,
+        apiType,
     });
-
-    // 屏蔽密钥用于诊断展示
-    const maskedHeaders = { ...headers };
-    if (maskedHeaders.Authorization) {
-        maskedHeaders.Authorization = `Bearer ${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`;
-    }
-    if (maskedHeaders['x-api-key']) {
-        maskedHeaders['x-api-key'] = `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`;
-    }
-
-    const baseDetails = {
-        request: {
-            url: fullUrl,
-            method: 'POST',
-            apiType,
-            headers: maskedHeaders,
-            bodyPreview: body
-        }
-    };
-
-    let response;
-    try {
-        response = await fetch(fullUrl, { method: 'POST', headers, body });
-    } catch (e) {
-        // 网络层错误（CORS、DNS、SSL、未连接……）通常没有 response
-        const err = new Error(`API测试失败：网络层错误 - ${e.message || e.name}`);
-        err.details = {
-            ...baseDetails,
-            elapsedMs: Date.now() - startedAt,
-            errorType: e.name || 'Error',
-            errorMessage: e.message || String(e),
-            errorStack: e.stack || null,
-            hint: '常见原因：1) Tauri webview 的 CORS 限制；2) URL 错误或域名解析失败；3) HTTPS 证书问题；4) 防火墙/代理拦截。建议改用后端发请求。'
-        };
+    if (!result?.ok) {
+        const err = new Error(result?.message || 'API测试失败');
+        err.details = result?.details || {};
         throw err;
     }
-
-    // 拿到响应 -> 先以文本形式读取，再尝试 JSON 解析（防止响应不是 JSON 时丢失信息）
-    const rawText = await response.text();
-    let data = null;
-    let parseError = null;
-    try {
-        data = JSON.parse(rawText);
-    } catch (e) {
-        parseError = e.message;
-    }
-
-    const responseInfo = {
-        status: response.status,
-        statusText: response.statusText,
-        ok: response.ok,
-        bodyPreview: rawText.length > 2000 ? rawText.slice(0, 2000) + '...(truncated)' : rawText,
-        parseError
-    };
-
-    if (!response.ok) {
-        const apiMsg = data?.error?.message || data?.message || rawText.slice(0, 200);
-        const err = new Error(`API测试失败：HTTP ${response.status} - ${apiMsg}`);
-        err.details = { ...baseDetails, elapsedMs: Date.now() - startedAt, response: responseInfo };
-        throw err;
-    }
-
-    if (data?.error) {
-        const err = new Error(`API测试失败：${data.error.message || '未知错误'}`);
-        err.details = { ...baseDetails, elapsedMs: Date.now() - startedAt, response: responseInfo };
-        throw err;
-    }
-
-    const success = apiType === 'anthropic'
-        ? !!(data?.content?.[0]?.text)
-        : !!(data?.choices?.[0]?.message);
-
-    if (!success) {
-        const err = new Error('API测试失败：响应格式不正确');
-        err.details = { ...baseDetails, elapsedMs: Date.now() - startedAt, response: responseInfo };
-        throw err;
-    }
-
-    return { ok: true, details: { ...baseDetails, elapsedMs: Date.now() - startedAt, response: responseInfo } };
+    return result;
 };
 
 const MODEL_OPTIONS = [
