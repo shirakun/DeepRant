@@ -5,17 +5,17 @@ import { useStore } from '../components/StoreProvider';
 import { showSuccess, showError } from '../utils/toast';
 
 // 添加测试函数
-const testOpenAIConnection = async (apiKey, baseUrl, modelName) => {
+const testOpenAIConnection = async (apiKey, baseUrl, modelName, apiType = 'openai') => {
     try {
-        const headers = {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`
-        };
+        let headers, body;
 
-        const response = await fetch(`${baseUrl}`, {
-            method: 'POST',
-            headers: headers,
-            body: JSON.stringify({
+        if (apiType === 'anthropic') {
+            headers = {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01'
+            };
+            body = JSON.stringify({
                 model: modelName,
                 messages: [
                     {
@@ -24,7 +24,29 @@ const testOpenAIConnection = async (apiKey, baseUrl, modelName) => {
                     }
                 ],
                 max_tokens: 10
-            })
+            });
+        } else {
+            // openai 和 opencode-go 都使用 OpenAI 兼容格式
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`
+            };
+            body = JSON.stringify({
+                model: modelName,
+                messages: [
+                    {
+                        role: "user",
+                        content: "Hello, this is a test message. Please reply with 'OK' if you receive this."
+                    }
+                ],
+                max_tokens: 10
+            });
+        }
+
+        const response = await fetch(`${baseUrl}`, {
+            method: 'POST',
+            headers: headers,
+            body: body
         });
 
         const data = await response.json();
@@ -33,8 +55,14 @@ const testOpenAIConnection = async (apiKey, baseUrl, modelName) => {
             throw new Error(data.error.message || '未知错误');
         }
 
-        if (data.choices && data.choices[0] && data.choices[0].message) {
-            return true;
+        if (apiType === 'anthropic') {
+            if (data.content && data.content[0] && data.content[0].text) {
+                return true;
+            }
+        } else {
+            if (data.choices && data.choices[0] && data.choices[0].message) {
+                return true;
+            }
         }
 
         throw new Error('响应格式不正确');
@@ -149,6 +177,24 @@ export default function Settings() {
                     </div>
                     <div className="space-y-4">
                         <div>
+                            <label className="block text-sm text-zinc-500 mb-2">API 类型</label>
+                            <select
+                                disabled={activeModel !== 'custom'}
+                                value={settings?.custom_model?.api_type || 'openai'}
+                                onChange={(e) => updateSettings({
+                                    custom_model: {
+                                        ...settings?.custom_model,
+                                        api_type: e.target.value
+                                    }
+                                })}
+                                className="w-full px-4 py-2.5 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg text-sm text-zinc-700 dark:text-zinc-300 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                <option value="openai">OpenAI 兼容 (openai)</option>
+                                <option value="anthropic">Anthropic (Claude)</option>
+                                <option value="opencode-go">OpenCode Go</option>
+                            </select>
+                        </div>
+                        <div>
                             <label className="block text-sm text-zinc-500 mb-2">API Key</label>
                             <input
                                 type="text"
@@ -221,7 +267,8 @@ export default function Settings() {
                                             const result = await testOpenAIConnection(
                                                 settings.custom_model.auth,
                                                 settings.custom_model.api_url,
-                                                settings.custom_model.model_name
+                                                settings.custom_model.model_name,
+                                                settings.custom_model.api_type
                                             );
                                             if (result) {
                                                 showSuccess('API连接测试成功！');

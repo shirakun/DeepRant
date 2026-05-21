@@ -10,6 +10,12 @@ pub struct ModelConfig {
     pub auth: String,
     pub api_url: String,
     pub model_name: String,
+    #[serde(default = "default_api_type")]
+    pub api_type: String,
+}
+
+fn default_api_type() -> String {
+    "openai".to_string()
 }
 
 // 添加常用语结构体
@@ -103,7 +109,8 @@ pub fn initialize_settings(app: &AppHandle) -> Result<(), anyhow::Error> {
         "custom_model": {
             "auth": "",
             "api_url": "https://api.openai.com/v1/chat/completions",
-            "model_name": "gpt-3.5-turbo"
+            "model_name": "gpt-3.5-turbo",
+            "api_type": "openai"
         },
         "phrases": phrases
     });

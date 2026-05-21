@@ -170,16 +170,19 @@ fn get_model_config(settings: &crate::store::AppSettings) -> crate::store::Model
             auth: "sk-jleighwqdtyssxeycgmwxqrhbofpsbkhtobofxhbeyebupyh".to_string(),
             api_url: "https://api.siliconflow.cn/v1/chat/completions".to_string(),
             model_name: "deepseek-ai/DeepSeek-V3".to_string(),
+            api_type: "openai".to_string(),
         },
         "deepseek-R1" => crate::store::ModelConfig {
             auth: "sk-jleighwqdtyssxeycgmwxqrhbofpsbkhtobofxhbeyebupyh".to_string(),
             api_url: "https://api.siliconflow.cn/v1/chat/completions".to_string(),
             model_name: "deepseek-ai/DeepSeek-R1".to_string(),
+            api_type: "openai".to_string(),
         },
         "stepfun" => crate::store::ModelConfig {
             auth: "605JU1zU7cGmFp0ibbZlZZ3Qra3lRH7FDtpvICyf2pTrRrUaO6CQgW8p3sQatd5Wh".to_string(),
             api_url: "https://api.stepfun.com/v1/chat/completions".to_string(),
             model_name: "step-2-16k".to_string(),
+            api_type: "openai".to_string(),
         },
         "custom" => settings.custom_model.clone(),
         _ => settings.custom_model.clone(),
@@ -212,7 +215,23 @@ pub async fn translate_with_gpt(app: &AppHandle, original: &str) -> Result<Strin
 
     let client = Client::new();
 
-    let request_body = if settings.model_type == "deepseek-R1" {
+    let api_type = model_config.api_type.to_lowercase();
+
+    let request_body = if api_type == "anthropic" {
+        // Anthropic API 格式
+        let max_tokens = if settings.model_type == "deepseek-R1" { 8000 } else { 300 };
+        json!({
+            "model": model_config.model_name,
+            "system": system_prompt,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": original
+                }
+            ],
+            "max_tokens": max_tokens
+        })
+    } else if settings.model_type == "deepseek-R1" {
         json!({
             "model": model_config.model_name,
             "messages": [
@@ -250,10 +269,19 @@ pub async fn translate_with_gpt(app: &AppHandle, original: &str) -> Result<Strin
         })
     };
 
-    let response = match client
+    let request_builder = client
         .post(&model_config.api_url)
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", model_config.auth))
+        .header("Content-Type", "application/json");
+
+    let request_builder = if api_type == "anthropic" {
+        request_builder
+            .header("x-api-key", &model_config.auth)
+            .header("anthropic-version", "2023-06-01")
+    } else {
+        request_builder.header("Authorization", format!("Bearer {}", model_config.auth))
+    };
+
+    let response = match request_builder
         .json(&request_body)
         .send()
         .await
@@ -286,26 +314,50 @@ pub async fn translate_with_gpt(app: &AppHandle, original: &str) -> Result<Strin
 
     // 解析响应
     println!("API响应原文: {:?}", response);
-    let translated = match response
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-    {
-        Some(text) => {
-            let text = text.trim();
-            // 如果找到</think>标签，只保留其后内容
-            if let Some(end_pos) = text.find("</think>") {
-                text[(end_pos + 8)..].trim().to_string()
-            } else {
-                text.to_string()
+    let translated = if api_type == "anthropic" {
+        match response
+            .get("content")
+            .and_then(|content| content.as_array())
+            .and_then(|content| content.first())
+            .and_then(|item| item.get("text"))
+            .and_then(|text| text.as_str())
+        {
+            Some(text) => {
+                let text = text.trim();
+                // 如果找到<think>标签，只保留其后内容
+                if let Some(end_pos) = text.find("</think>") {
+                    text[(end_pos + 8)..].trim().to_string()
+                } else {
+                    text.to_string()
+                }
+            }
+            None => {
+                println!("无法从Anthropic响应中提取翻译结果: {:?}", response);
+                return Ok("[错误] 服务器返回的数据格式异常".to_string());
             }
         }
-        None => {
-            println!("无法从响应中提取翻译结果: {:?}", response);
-            return Ok("[错误] 服务器返回的数据格式异常".to_string());
+    } else {
+        match response
+            .get("choices")
+            .and_then(|choices| choices.as_array())
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+        {
+            Some(text) => {
+                let text = text.trim();
+                // 如果找到<think>标签，只保留其后内容
+                if let Some(end_pos) = text.find("</think>") {
+                    text[(end_pos + 8)..].trim().to_string()
+                } else {
+                    text.to_string()
+                }
+            }
+            None => {
+                println!("无法从响应中提取翻译结果: {:?}", response);
+                return Ok("[错误] 服务器返回的数据格式异常".to_string());
+            }
         }
     };
 
